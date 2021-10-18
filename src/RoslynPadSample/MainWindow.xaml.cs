@@ -6,6 +6,8 @@
     using System.Windows.Media;
     using System.Windows.Threading;
 
+    using Avalon.Windows.Controls;
+
     using RoslynPad.Editor;
 
     using RoslynPadSample.ViewModels;
@@ -23,11 +25,38 @@
             InitializeComponent();
 
             Loaded += MainWindow_Loaded;
+            ((App)Application.Current).UnhandledException += MainViewModel_UnhandledException;
+        }
+
+        private void MainViewModel_UnhandledException(Exception ex)
+        {
+            Dispatcher.InvokeAsync(
+                () =>
+                    {
+                        TaskDialog.ShowInline(
+                            this,
+                            "Unhandled Exception",
+                            $"{ex.GetType().Name}: {ex.Message}",
+                            string.Empty,
+                            TaskDialogButtons.Close);
+                    },
+                DispatcherPriority.Background);
         }
 
         private void MainWindow_Loaded(object sender, RoutedEventArgs e)
         {
             _viewModel = (MainViewModel)DataContext;
+            _viewModel.OutputMessage += s =>
+                {
+                    Dispatcher.InvokeAsync(
+                        () =>
+                            {
+                                OutputText.AppendText($"{DateTime.Now:dd/MM/yyyy HH:mm:ss.fff} - {s}{Environment.NewLine}");
+                                OutputText.ScrollToEnd();
+                            },
+                        DispatcherPriority.Background);
+                };
+
             _errorMargin = new MarkerMargin { Visibility = Visibility.Collapsed, MarkerImage = TryFindResource("ExceptionMarker") as ImageSource, Width = 10 };
             CodeEditor.TextArea.LeftMargins.Insert(0, _errorMargin);
 

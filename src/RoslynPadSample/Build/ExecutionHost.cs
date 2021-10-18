@@ -1,171 +1,189 @@
 ﻿namespace RoslynPadSample.Build
 {
     using System;
-    using System.Collections.Generic;
-    using System.Collections.Immutable;
     using System.Diagnostics;
     using System.IO;
     using System.Linq;
-    using System.Runtime.InteropServices;
+    using System.Threading;
+    using System.Threading.Tasks;
+    using System.Xml.Linq;
 
     using Microsoft.CodeAnalysis;
     using Microsoft.CodeAnalysis.Diagnostics;
     using Microsoft.CodeAnalysis.Scripting;
-    using NuGet.Versioning;
 
     using RoslynPad.Roslyn;
 
     public sealed class ExecutionHost
     {
+        private readonly BuildInfo _buildInfo;
+
         private readonly RoslynHost _roslynHost;
-
         private readonly DocumentId _documentId;
-
-        private readonly string _buildPath;
 
         private ScriptOptions _scriptOptions;
 
-        private readonly string _dotNetExe;
-        private readonly string _dotNetSdkPath;
-        private readonly string _dotNetTargetFrameworkMoniker;
-        private readonly string _dotNetSdkVersion;
-
         private readonly IAnalyzerAssemblyLoader _analyzerAssemblyLoader;
 
-        public ExecutionHost(RoslynHost roslynHost, DocumentId documentId, string buildPath, IEnumerable<string> imports)
+        private Task _restoreTask;
+        private CancellationTokenSource _restoreCts;
+
+        public event Action<string> RestoreMessage;
+        public event Action<MetadataReference[], AnalyzerFileReference[]> RestoreCompleted;
+
+        public ExecutionHost(BuildInfo buildInfo, RoslynHost roslynHost, DocumentId documentId)
         {
-            if (imports == null)
-            {
-                throw new ArgumentNullException(nameof(imports));
-            }
-
-            if (string.IsNullOrWhiteSpace(buildPath))
-            {
-                throw new ArgumentException("Value cannot be null or whitespace.", nameof(buildPath));
-            }
-
+            _buildInfo = buildInfo ?? throw new ArgumentNullException(nameof(buildInfo));
             _roslynHost = roslynHost ?? throw new ArgumentNullException(nameof(roslynHost));
             _documentId = documentId ?? throw new ArgumentNullException(nameof(documentId));
             _analyzerAssemblyLoader = _roslynHost.GetService<IAnalyzerAssemblyLoader>();
-
-            _buildPath = buildPath;
-            _scriptOptions = ScriptOptions.Default.WithImports(imports);
-
-            (_dotNetExe, _dotNetSdkPath) = FindNetCore();
-            (_dotNetTargetFrameworkMoniker, _dotNetSdkVersion) = GetCoreSdkVersionInfo(_dotNetSdkPath);
         }
 
         public void Restore()
         {
-            BuildGlobalJson();
-            var csprojPath = BuildCsproj();
-
-            var errorsPath = Path.Combine(_buildPath, "errors.log");
-            File.Delete(errorsPath);
-
-            using var result = RunProcess(_dotNetExe, _buildPath, $"build -nologo -p:nugetinteractive=true -flp:errorsonly;logfile=\"{errorsPath}\" \"{csprojPath}\"");
-
-            result.WaitForExit();
-
-            var references = ReadBuildFileLines(MSBuildHelper.ReferencesFile);
-            var analyzers = ReadBuildFileLines(MSBuildHelper.AnalyzersFile);
-
-            var metadataReferences = references
-                .Where(r => !string.IsNullOrWhiteSpace(r))
-                .Select(r => _roslynHost.CreateMetadataReference(r))
-                .ToArray();
-
-            var analyzerReferences = analyzers
-                .Where(r => !string.IsNullOrWhiteSpace(r))
-                .Select(r => new AnalyzerFileReference(r, _analyzerAssemblyLoader))
-                .ToArray();
-
-            _scriptOptions = _scriptOptions.WithReferences(metadataReferences);
-
-            var document = _roslynHost.GetDocument(_documentId);
-            if (document == null)
+            if (_restoreCts != null)
             {
-                throw new InvalidOperationException($"Document not found for documentId: {_documentId}");
+                _restoreCts.Cancel();
+                _restoreCts.Dispose();
             }
 
-            var project = document.Project;
-
-            project = project
-                .WithMetadataReferences(metadataReferences)
-                .WithAnalyzerReferences(analyzerReferences);
-
-            document = project.GetDocument(_documentId);
-
-            _roslynHost.UpdateDocument(document);
+            var restoreCts = new CancellationTokenSource();
+            _restoreTask = RestoreAsync(GetCurrentRestoreTask(), restoreCts.Token);
+            _restoreCts = restoreCts;
         }
 
-        private void BuildGlobalJson()
+        private async Task RestoreAsync(Task previousRestoreTask, CancellationToken cancellationToken)
         {
-            var global = $"{{\r\n  \"sdk\": {{\r\n    \"version\": \"{_dotNetSdkVersion}\"\r\n  }}\r\n}}";
-            File.WriteAllText(Path.Combine(_buildPath, "global.json"), global);
+            try
+            {
+                await previousRestoreTask.ConfigureAwait(false);
+            }
+            catch
+            {
+                // Empty
+            }
+
+            try
+            {
+                await BuildGlobalJsonAsync(cancellationToken).ConfigureAwait(false);
+                var csprojPath = await BuildCsprojAsync(cancellationToken).ConfigureAwait(false);
+
+                var errorsPath = Path.Combine(_buildInfo.BuildPath, "errors.log");
+                File.Delete(errorsPath);
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                using var restoreProcess = RunProcess(
+                    _buildInfo.DotNetSdkInfo.DotNetExe,
+                    _buildInfo.BuildPath,
+                    $"build -nologo -p:nugetinteractive=true -flp:errorsonly;logfile=\"{errorsPath}\" \"{csprojPath}\"",
+                    cancellationToken);
+
+                await ReadRestoreProcessStandardOutputAsync(restoreProcess).ConfigureAwait(false);
+                await restoreProcess.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+
+                if (restoreProcess.ExitCode != 0)
+                {
+                    await ReadRestoreProcessErrorAsync(restoreProcess, errorsPath, cancellationToken).ConfigureAwait(false);
+
+                    return;
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var references = await ReadBuildFileLinesAsync(MSBuildHelper.ReferencesFile, cancellationToken).ConfigureAwait(false);
+                var analyzers = await ReadBuildFileLinesAsync(MSBuildHelper.AnalyzersFile, cancellationToken).ConfigureAwait(false);
+
+                var metadataReferences = references.Where(r => !string.IsNullOrWhiteSpace(r))
+                    .Select(r => _roslynHost.CreateMetadataReference(r)).ToArray();
+
+                var analyzerReferences = analyzers.Where(r => !string.IsNullOrWhiteSpace(r))
+                    .Select(r => new AnalyzerFileReference(r, _analyzerAssemblyLoader)).ToArray();
+
+                // _scriptOptions = _scriptOptions.WithReferences(metadataReferences);
+                RestoreMessage?.Invoke("Restore completed successfully...");
+                RestoreCompleted?.Invoke(metadataReferences, analyzerReferences);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                RestoreMessage?.Invoke($"Restore completed with error: {ex.Message}");
+            }
         }
 
-        private string BuildCsproj()
+        private async Task ReadRestoreProcessErrorAsync(
+            Process restoreProcess,
+            string errorsPath,
+            CancellationToken cancellationToken)
         {
-            var csproj = MSBuildHelper.CreateCsproj(_dotNetTargetFrameworkMoniker);
-            var csprojPath = Path.Combine(_buildPath, "rpSampleProject.csproj");
+            try
+            {
+                var errors = await File.ReadAllLinesAsync(errorsPath, cancellationToken).ConfigureAwait(false);
+                if (errors.Length > 0)
+                {
+                    for (var i = 0; i < errors.Length; i++)
+                    {
+                        RestoreMessage?.Invoke(errors[i]);
+                    }
+                }
+                else
+                {
+                    await ReadRestoreProcessStandardErrorAsync(restoreProcess).ConfigureAwait(false);
+                }
+            }
+            catch (FileNotFoundException)
+            {
+                await ReadRestoreProcessStandardErrorAsync(restoreProcess).ConfigureAwait(false);
+            }
+        }
 
-            csproj.Save(csprojPath);
+        private async Task ReadRestoreProcessStandardOutputAsync(Process restoreProcess)
+        {
+            string line;
+            while ((line = await restoreProcess.StandardOutput.ReadLineAsync().ConfigureAwait(false)) != null)
+            {
+                if (!string.IsNullOrWhiteSpace(line))
+                {
+                    RestoreMessage?.Invoke(line.Trim());
+                }
+            }
+        }
+
+        private async Task ReadRestoreProcessStandardErrorAsync(Process restoreProcess)
+        {
+            string line;
+            while ((line = await restoreProcess.StandardError.ReadLineAsync().ConfigureAwait(false)) != null)
+            {
+                if (!string.IsNullOrWhiteSpace(line))
+                {
+                    RestoreMessage?.Invoke(line.Trim());
+                }
+            }
+        }
+
+        private Task GetCurrentRestoreTask() => _restoreTask ?? Task.CompletedTask;
+
+        private Task BuildGlobalJsonAsync(CancellationToken cancellationToken)
+        {
+            return File.WriteAllTextAsync(
+                Path.Combine(_buildInfo.BuildPath, "global.json"),
+                $"{{\r\n  \"sdk\": {{\r\n    \"version\": \"{_buildInfo.DotNetSdkInfo.FrameworkVersion}\"\r\n  }}\r\n}}",
+                cancellationToken);
+        }
+
+        private async Task<string> BuildCsprojAsync(CancellationToken cancellationToken)
+        {
+            var csproj = MSBuildHelper.CreateCsproj(_buildInfo.DotNetSdkInfo.TargetFrameworkMoniker);
+            var csprojPath = Path.Combine(_buildInfo.BuildPath, "rpSampleProject.csproj");
+
+            using (var fs = new FileStream(csprojPath, FileMode.Create))
+            {
+                await csproj.SaveAsync(fs, SaveOptions.None, cancellationToken).ConfigureAwait(false);
+            }
+           
             return csprojPath;
         }
 
-        private static (string tfm, string name) GetCoreSdkVersionInfo(string sdkPath)
-        {
-            var dictionary = new Dictionary<NuGetVersion, (string tfm, string name)>();
-
-            foreach (var directory in Directory.EnumerateDirectories(sdkPath))
-            {
-                var versionName = Path.GetFileName(directory);
-                if (NuGetVersion.TryParse(versionName, out var version) && version.Major > 1)
-                {
-                    dictionary.Add(version, ($"netcoreapp{version.Major}.{version.Minor}", versionName));
-                }
-            }
-
-            return dictionary.OrderBy(c => c.Key.IsPrerelease)
-                              .ThenByDescending(c => c.Key)
-                              .Select(c => c.Value)
-                              .FirstOrDefault();
-        }
-
-        private static (string dotnetExe, string sdkPath) FindNetCore()
-        {
-            string[] dotnetPaths;
-            string dotnetExe;
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                dotnetPaths = new[] { Path.Combine(Environment.GetEnvironmentVariable("ProgramW6432"), "dotnet") };
-                dotnetExe = "dotnet.exe";
-            }
-            else
-            {
-                dotnetPaths = new[] { "/usr/share/dotnet", "/usr/local/share/dotnet" };
-                dotnetExe = "dotnet";
-            }
-
-            var sdkPath = (from path in dotnetPaths
-                           let fullPath = Path.Combine(path, "sdk")
-                           where Directory.Exists(fullPath)
-                           select fullPath).FirstOrDefault();
-
-            if (sdkPath != null)
-            {
-                dotnetExe = Path.GetFullPath(Path.Combine(sdkPath, "..", dotnetExe));
-                if (File.Exists(dotnetExe))
-                {
-                    return (dotnetExe, sdkPath);
-                }
-            }
-
-            return (string.Empty, string.Empty);
-        }
-
-        private static Process RunProcess(string path, string workingDirectory, string arguments)
+        private static Process RunProcess(string path, string workingDirectory, string arguments, CancellationToken cancellationToken)
         {
             var process = new Process
                               {
@@ -181,14 +199,30 @@
                                                   }
                               };
 
+            using var _ = cancellationToken.Register(() =>
+                {
+                    try
+                    {
+                        process.Kill();
+                    }
+                    catch
+                    {
+                        // Empty
+                    }
+                });
+
             process.Start();
             return process;
         }
 
-        private string[] ReadBuildFileLines(string file)
+        private Task<string[]> ReadBuildFileLinesAsync(string file, CancellationToken cancellationToken)
         {
-            var path = Path.Combine(_buildPath, file);
-            return File.ReadAllLines(path);
+            return File.ReadAllLinesAsync(Path.Combine(_buildInfo.BuildPath, file), cancellationToken);
+        }
+
+        public async Task ExecuteAsync(string code)
+        {
+            await GetCurrentRestoreTask().ConfigureAwait(false);
         }
     }
 }

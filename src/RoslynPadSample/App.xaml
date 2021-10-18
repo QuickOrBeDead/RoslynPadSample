@@ -4,7 +4,7 @@
              xmlns:codeAnalysis="clr-namespace:Microsoft.CodeAnalysis;assembly=Microsoft.CodeAnalysis"
              xmlns:codeFixes="clr-namespace:RoslynPad.Roslyn.CodeFixes;assembly=RoslynPad.Roslyn"
              xmlns:codeActions="clr-namespace:Microsoft.CodeAnalysis.CodeActions;assembly=Microsoft.CodeAnalysis.Workspaces"
-             xmlns:formatting="clr-namespace:RoslynPadSample.Formatting">
+             xmlns:converters="clr-namespace:RoslynPadSample.Converters">
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
@@ -18,13 +18,13 @@
             </HierarchicalDataTemplate>
 
             <HierarchicalDataTemplate DataType="{x:Type codeFixes:CodeFix}"
-                                      ItemsSource="{Binding Action, Mode=OneTime, Converter={formatting:CodeActionsConverter}}">
+                                      ItemsSource="{Binding Action, Mode=OneTime, Converter={converters:CodeActionsConverter}}">
                 <ContentPresenter Content="{Binding Action, Mode=OneTime}" />
             </HierarchicalDataTemplate>
 
             <DataTemplate DataType="{x:Type codeActions:CodeAction}">
                 <DockPanel>
-                    <Image Source="{Binding Mode=OneTime, Converter={formatting:CodeActionToGlyphConverter}}" />
+                    <Image Source="{Binding Mode=OneTime, Converter={converters:CodeActionToGlyphConverter}}" />
                     <TextBlock Text="{Binding Title, Mode=OneTime}" />
                 </DockPanel>
             </DataTemplate>

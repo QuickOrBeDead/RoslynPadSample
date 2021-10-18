@@ -1,4 +1,4 @@
-namespace RoslynPadSample.Formatting
+namespace RoslynPadSample.Converters
 {
     using System;
     using System.Globalization;
@@ -7,10 +7,9 @@ namespace RoslynPadSample.Formatting
 
     using Microsoft.CodeAnalysis.CodeActions;
 
-    using RoslynPad.Roslyn;
     using RoslynPad.Roslyn.CodeActions;
 
-    internal sealed class CodeActionToGlyphConverter : MarkupExtension, IValueConverter
+    internal sealed class CodeActionsConverter : MarkupExtension, IValueConverter
     {
         public override object ProvideValue(IServiceProvider serviceProvider)
         {
@@ -19,7 +18,8 @@ namespace RoslynPadSample.Formatting
 
         public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
         {
-            return ((CodeAction)value ?? throw new InvalidOperationException($"CodeActionToGlyphConverter value is null. Target type: {targetType.FullName}")).GetGlyph().ToImageSource();
+            var result = value as CodeAction;
+            return result?.GetCodeActions() ?? value;
         }
 
         public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)

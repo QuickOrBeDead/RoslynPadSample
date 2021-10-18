@@ -1,6 +1,5 @@
 ﻿namespace RoslynPadSample.Build
 {
-    using System;
     using System.Xml.Linq;
 
     internal static class MSBuildHelper
@@ -29,11 +28,6 @@
                 new XElement("AppendRuntimeIdentifierToOutputPath", false),
                 new XElement("CopyBuildOutputToOutputDirectory", false),
                 new XElement("GenerateAssemblyInfo", false));
-
-            if (!targetFramework.Contains("core", StringComparison.OrdinalIgnoreCase))
-            {
-                group.Add(new XElement("FrameworkPathOverride", @"$(WinDir)\Microsoft.NET\Framework\v4.0.30319"));
-            }
 
             return group;
         }

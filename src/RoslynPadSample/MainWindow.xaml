@@ -5,19 +5,56 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:editor="clr-namespace:RoslynPad.Editor;assembly=RoslynPad.Editor.Windows"
         xmlns:viewModels="clr-namespace:RoslynPadSample.ViewModels"
+        xmlns:avalonedit="http://icsharpcode.net/sharpdevelop/avalonedit"
+        xmlns:av="http://schemas.codeplex.com/wpfcontrib/xaml/presentation"
         d:DataContext="{d:DesignInstance viewModels:MainViewModel}"
         mc:Ignorable="d"
         Title="RoslynPad Sample" 
         Height="450" 
         Width="800"
         ResizeMode="CanResizeWithGrip"
-        WindowStartupLocation="CenterScreen">
-    <Grid>
-        <editor:RoslynCodeEditor x:Name="CodeEditor"
-                                 x:FieldModifier="private"
-                                 ContextActionsIcon="{StaticResource Bulb}"
-                                 IsBraceCompletionEnabled="True"
-                                 FontFamily="Consolas"
-                                 Loaded="Editor_OnLoaded" />
-    </Grid>
+        WindowStartupLocation="CenterScreen"
+        Name="This">
+    <av:InlineModalDecorator Target="{Binding ElementName=This, Mode=OneTime}">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition />
+                <RowDefinition />
+            </Grid.RowDefinitions>
+            <ToolBar Grid.Row="0" Grid.ColumnSpan="3"
+                         Background="Transparent"
+                         BorderBrush="DarkGray"
+                         BorderThickness="0 0 0 1">
+                <Button Command="{Binding RunCommand, Mode=OneTime}" ToolTip="Run">
+                    <Grid>
+                        <Image>
+                            <Image.Style>
+                                <Style TargetType="Image">
+                                    <Setter Property="Source" Value="{StaticResource Run}" />
+                                </Style>
+                            </Image.Style>
+                        </Image>
+                    </Grid>
+                </Button>
+                <ComboBox ItemsSource="{Binding DotNetSdkList, Mode=OneTime}"
+                          SelectedItem="{Binding DotNetSdk}" />
+            </ToolBar>
+            <editor:RoslynCodeEditor Grid.Row="1" x:Name="CodeEditor"
+                                     x:FieldModifier="private"
+                                     ContextActionsIcon="{StaticResource Bulb}"
+                                     IsBraceCompletionEnabled="True"
+                                     FontFamily="Consolas"
+                                     Loaded="Editor_OnLoaded" />
+            <avalonedit:TextEditor Grid.Row="2"
+                                    Name="OutputText"
+                                    FontFamily="Consolas"
+                                    FontSize="10pt"
+                                    IsReadOnly="True"
+                                    ShowLineNumbers="True"
+                                    WordWrap="True"
+                                    Background="Black"
+                                    Foreground="White"/>
+        </Grid>
+        </av:InlineModalDecorator>
 </Window>
