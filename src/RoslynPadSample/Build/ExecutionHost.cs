@@ -4,38 +4,40 @@
     using System.Diagnostics;
     using System.IO;
     using System.Linq;
+    using System.Text;
     using System.Threading;
     using System.Threading.Tasks;
     using System.Xml.Linq;
 
     using Microsoft.CodeAnalysis;
+    using Microsoft.CodeAnalysis.CSharp;
     using Microsoft.CodeAnalysis.Diagnostics;
     using Microsoft.CodeAnalysis.Scripting;
 
     using RoslynPad.Roslyn;
+    using RoslynPad.Roslyn.Scripting;
 
     public sealed class ExecutionHost
     {
         private readonly BuildInfo _buildInfo;
-
         private readonly RoslynHost _roslynHost;
-        private readonly DocumentId _documentId;
-
-        private ScriptOptions _scriptOptions;
 
         private readonly IAnalyzerAssemblyLoader _analyzerAssemblyLoader;
 
         private Task _restoreTask;
         private CancellationTokenSource _restoreCts;
 
+        private MetadataReference[] _metadataReferences;
+
         public event Action<string> RestoreMessage;
+        public event Action<string> BuildMessage;
+        public event Action<string> ConsoleMessage;
         public event Action<MetadataReference[], AnalyzerFileReference[]> RestoreCompleted;
 
-        public ExecutionHost(BuildInfo buildInfo, RoslynHost roslynHost, DocumentId documentId)
+        public ExecutionHost(BuildInfo buildInfo, RoslynHost roslynHost)
         {
             _buildInfo = buildInfo ?? throw new ArgumentNullException(nameof(buildInfo));
             _roslynHost = roslynHost ?? throw new ArgumentNullException(nameof(roslynHost));
-            _documentId = documentId ?? throw new ArgumentNullException(nameof(documentId));
             _analyzerAssemblyLoader = _roslynHost.GetService<IAnalyzerAssemblyLoader>();
         }
 
@@ -94,15 +96,14 @@
                 var references = await ReadBuildFileLinesAsync(MSBuildHelper.ReferencesFile, cancellationToken).ConfigureAwait(false);
                 var analyzers = await ReadBuildFileLinesAsync(MSBuildHelper.AnalyzersFile, cancellationToken).ConfigureAwait(false);
 
-                var metadataReferences = references.Where(r => !string.IsNullOrWhiteSpace(r))
+                _metadataReferences = references.Where(r => !string.IsNullOrWhiteSpace(r))
                     .Select(r => _roslynHost.CreateMetadataReference(r)).ToArray();
 
                 var analyzerReferences = analyzers.Where(r => !string.IsNullOrWhiteSpace(r))
                     .Select(r => new AnalyzerFileReference(r, _analyzerAssemblyLoader)).ToArray();
 
-                // _scriptOptions = _scriptOptions.WithReferences(metadataReferences);
                 RestoreMessage?.Invoke("Restore completed successfully...");
-                RestoreCompleted?.Invoke(metadataReferences, analyzerReferences);
+                RestoreCompleted?.Invoke(_metadataReferences, analyzerReferences);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -223,6 +224,105 @@
         public async Task ExecuteAsync(string code)
         {
             await GetCurrentRestoreTask().ConfigureAwait(false);
+
+            using var executeCts = new CancellationTokenSource();
+            var cancellationToken = executeCts.Token;
+
+            var scriptOptions = ScriptOptions.Default;
+            if (_metadataReferences != null)
+            {
+                scriptOptions = scriptOptions.WithReferences(_metadataReferences);
+            }
+
+            var script = new ScriptRunner(
+                code,
+                parseOptions: _roslynHost.ParseOptions as CSharpParseOptions,
+                outputKind: OutputKind.ConsoleApplication,
+                platform: Platform.AnyCpu,
+                references: scriptOptions.MetadataReferences,
+                usings: scriptOptions.Imports,
+                filePath: scriptOptions.FilePath,
+                workingDirectory: _buildInfo.BuildPath,
+                metadataResolver: scriptOptions.MetadataResolver,
+                optimizationLevel: OptimizationLevel.Release,
+                checkOverflow: true,
+                allowUnsafe: true);
+
+            var assemblyPath = Path.Combine(_buildInfo.BuildPath, "bin", "rpSampleProject.dll");
+
+            var diagnostics = await script.SaveAssembly(assemblyPath, cancellationToken).ConfigureAwait(false);
+            
+            // TODO: send diagnostics messages to UI Console
+
+            BuildMessage?.Invoke($"{assemblyPath} assembly save ended.");
+
+            var errorDiagnostics = diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error).ToList();
+            if (errorDiagnostics.Any())
+            {
+                // TODO: send error diagnostics messages to UI Console
+
+                BuildMessage?.Invoke("Build FAILED.");
+
+                return;
+            }
+
+            BuildMessage?.Invoke("Build succeeded.");
+
+            await RunProcess(assemblyPath, cancellationToken);
+        }
+
+        private async Task RunProcess(string assemblyPath, CancellationToken cancellationToken)
+        {
+            using (var process = new Process
+                                     {
+                                         StartInfo = new ProcessStartInfo
+                                                         {
+                                                             FileName = _buildInfo.DotNetSdkInfo.DotNetExe,
+                                                             Arguments =
+                                                                 $"\"{assemblyPath}\" --pid {Environment.ProcessId}",
+                                                             WorkingDirectory = Path.GetDirectoryName(assemblyPath),
+                                                             CreateNoWindow = true,
+                                                             UseShellExecute = false,
+                                                             RedirectStandardOutput = true,
+                                                             RedirectStandardError = true,
+                                                             RedirectStandardInput = true,
+                                                             StandardOutputEncoding = Encoding.UTF8,
+                                                             StandardErrorEncoding = Encoding.UTF8
+                                                         }
+                                     })
+            {
+                await using (cancellationToken.Register(() =>
+                    {
+                        try
+                        {
+                            process?.Kill();
+                        }
+                        catch
+                        {
+                            // Empty
+                        }
+                    }))
+                {
+                    if (process.Start())
+                    {
+                        await Task.WhenAll(
+                            Task.Run(() => ReadProcessStream(process.StandardOutput), cancellationToken),
+                            Task.Run(() => ReadProcessStream(process.StandardError), cancellationToken));
+                    }
+                }
+            }
+        }
+
+        private async Task ReadProcessStream(StreamReader reader)
+        {
+            while (!reader.EndOfStream)
+            {
+                var line = await reader.ReadLineAsync().ConfigureAwait(false);
+                if (line != null)
+                {
+                    ConsoleMessage?.Invoke(line);
+                }
+            }
         }
     }
 }

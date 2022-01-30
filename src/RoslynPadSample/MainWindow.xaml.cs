@@ -3,7 +3,6 @@
     using System;
     using System.IO;
     using System.Windows;
-    using System.Windows.Media;
     using System.Windows.Threading;
 
     using Avalon.Windows.Controls;
@@ -17,7 +16,6 @@
     /// </summary>
     public partial class MainWindow : Window
     {
-        private MarkerMargin _errorMargin;
         private MainViewModel _viewModel;
 
         public MainWindow()
@@ -56,9 +54,6 @@
                             },
                         DispatcherPriority.Background);
                 };
-
-            _errorMargin = new MarkerMargin { Visibility = Visibility.Collapsed, MarkerImage = TryFindResource("ExceptionMarker") as ImageSource, Width = 10 };
-            CodeEditor.TextArea.LeftMargins.Insert(0, _errorMargin);
 
             var documentId = CodeEditor.Initialize(
                 _viewModel.RoslynHost,

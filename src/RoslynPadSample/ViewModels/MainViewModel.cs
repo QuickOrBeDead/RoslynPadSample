@@ -6,10 +6,7 @@
     using System.Linq;
     using System.Reflection;
     using System.Threading.Tasks;
-    using System.Windows;
     using System.Windows.Input;
-
-    using Avalon.Windows.Controls;
 
     using Microsoft.CodeAnalysis;
     using Microsoft.CodeAnalysis.Diagnostics;
@@ -125,9 +122,9 @@
         {
             _executionHost = new ExecutionHost(
                 new BuildInfo { DotNetSdkInfo = DotNetSdk, BuildPath = BuildPath },
-                RoslynHost,
-                DocumentId);
+                RoslynHost);
             _executionHost.RestoreMessage += s => OutputMessage?.Invoke(s);
+            _executionHost.ConsoleMessage += s => OutputMessage?.Invoke(s);
             _executionHost.RestoreCompleted += OnExecutionHost_OnRestoreCompleted;
             _executionHost.Restore();
         }
