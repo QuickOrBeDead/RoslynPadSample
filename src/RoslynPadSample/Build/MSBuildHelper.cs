@@ -1,5 +1,7 @@
 ﻿namespace RoslynPadSample.Build
 {
+    using System.Collections.Generic;
+    using System.Linq;
     using System.Xml.Linq;
 
     internal static class MSBuildHelper
@@ -7,14 +9,18 @@
         public const string ReferencesFile = "references.txt";
         public const string AnalyzersFile = "analyzers.txt";
 
-        public static XDocument CreateCsproj(string targetFramework) =>
+        public static XDocument CreateCsproj(string targetFramework, IEnumerable<string> references) =>
             new XDocument(
                 new XElement(
                     "Project",
                     ImportSdkProject("Microsoft.NET.Sdk", "Sdk.props"),
                     BuildProperties(targetFramework),
+                    References(references),
                     ImportSdkProject("Microsoft.NET.Sdk", "Sdk.targets"),
                     CoreCompileTarget()));
+
+        private static XElement References(IEnumerable<string> references) =>
+            new XElement("ItemGroup", references.Select(reference => new XElement("Reference", new XAttribute("Include", reference))).Cast<object>().ToArray());
 
         private static XElement BuildProperties(string targetFramework)
         {

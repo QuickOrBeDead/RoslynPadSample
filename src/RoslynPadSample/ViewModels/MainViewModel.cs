@@ -2,6 +2,8 @@
 {
     using System;
     using System.Collections.Generic;
+    using System.Collections.Immutable;
+    using System.Collections.ObjectModel;
     using System.IO;
     using System.Linq;
     using System.Reflection;
@@ -15,6 +17,9 @@
 
     using RoslynPadSample.Build;
     using RoslynPadSample.Commands;
+    using RoslynPadSample.Debugging;
+    using RoslynPadSample.Models;
+    using RoslynPadSample.Runtime;
 
     public sealed class MainViewModel : ViewModelBase
     {
@@ -25,7 +30,10 @@
 
         private bool _restoreCompleted;
 
+        private ObservableCollection<VariableModel> _variables;
+
         public event Action<string> OutputMessage;
+        public event Action<string> ConsoleMessage;
 
         public string SourceCode
         {
@@ -87,11 +95,18 @@
             }
         }
 
+        public ObservableCollection<VariableModel> Variables
+        {
+            get => _variables ??= new ObservableCollection<VariableModel>();
+            set => _variables = value;
+        }
+
         public MainViewModel()
         {
             RoslynHost = new RoslynHost(
                 new[] { Assembly.Load("RoslynPad.Editor.Windows"), Assembly.Load("RoslynPad.Roslyn.Windows") },
-                RoslynHostReferences.NamespaceDefault);
+                RoslynHostReferences.NamespaceDefault.With(typeNamespaceImports: new[] { typeof(RuntimeInitializer) }),
+                ImmutableArray.Create("CS1701", "CS1702"));
 
             Id = Guid.NewGuid().ToString("N");
             BuildPath = Path.Combine(Path.GetTempPath(), "RoslynPadSample", "build", Id);
@@ -108,7 +123,10 @@
         private async Task RunCodeAsync()
         {
             var code = (await RoslynHost.GetDocument(DocumentId).GetTextAsync().ConfigureAwait(false)).ToString();
-            await _executionHost.ExecuteAsync(code).ConfigureAwait(false);
+            var debugSourceCode = DebugSourceCodeGenerator.Generate(code);
+
+            await _executionHost.TerminateAsync().ConfigureAwait(false);
+            await _executionHost.ExecuteAsync(debugSourceCode).ConfigureAwait(false);
         }
 
         public void Init(DocumentId documentId)
@@ -124,7 +142,27 @@
                 new BuildInfo { DotNetSdkInfo = DotNetSdk, BuildPath = BuildPath },
                 RoslynHost);
             _executionHost.RestoreMessage += s => OutputMessage?.Invoke(s);
-            _executionHost.ConsoleMessage += s => OutputMessage?.Invoke(s);
+            _executionHost.ConsoleMessage += s =>
+                {
+                    if (s == null)
+                    {
+                        return;
+                    }
+
+                    switch (s)
+                    {
+                        case ConsoleMessage consoleMessage:
+                            ConsoleMessage?.Invoke(consoleMessage.Message);
+                            break;
+                        case DebugInfo debugInfo:
+                            Debugger.Notify(debugInfo.SpanStart, debugInfo.SpanLength, debugInfo.Variables);
+                            break;
+                        default:
+                            ConsoleMessage?.Invoke(s.ToString());
+                            break;
+                    }
+                };
+            _executionHost.BuildMessage += s => OutputMessage?.Invoke(s);
             _executionHost.RestoreCompleted += OnExecutionHost_OnRestoreCompleted;
             _executionHost.Restore();
         }

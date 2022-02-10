@@ -1,6 +1,7 @@
 ﻿namespace RoslynPadSample.Build
 {
     using System;
+    using System.Collections.Immutable;
     using System.Diagnostics;
     using System.IO;
     using System.Linq;
@@ -11,11 +12,14 @@
 
     using Microsoft.CodeAnalysis;
     using Microsoft.CodeAnalysis.CSharp;
+    using Microsoft.CodeAnalysis.CSharp.Syntax;
     using Microsoft.CodeAnalysis.Diagnostics;
     using Microsoft.CodeAnalysis.Scripting;
 
     using RoslynPad.Roslyn;
     using RoslynPad.Roslyn.Scripting;
+
+    using RoslynPadSample.Runtime;
 
     public sealed class ExecutionHost
     {
@@ -26,19 +30,24 @@
 
         private Task _restoreTask;
         private CancellationTokenSource _restoreCts;
+        private CancellationTokenSource _executeCts;
 
         private MetadataReference[] _metadataReferences;
 
         public event Action<string> RestoreMessage;
         public event Action<string> BuildMessage;
-        public event Action<string> ConsoleMessage;
+        public event Action<object> ConsoleMessage;
         public event Action<MetadataReference[], AnalyzerFileReference[]> RestoreCompleted;
+       
+        private readonly SyntaxTree _initHostSyntax;
 
         public ExecutionHost(BuildInfo buildInfo, RoslynHost roslynHost)
         {
             _buildInfo = buildInfo ?? throw new ArgumentNullException(nameof(buildInfo));
             _roslynHost = roslynHost ?? throw new ArgumentNullException(nameof(roslynHost));
             _analyzerAssemblyLoader = _roslynHost.GetService<IAnalyzerAssemblyLoader>();
+
+            _initHostSyntax = SyntaxFactory.ParseSyntaxTree(@"RoslynPadSample.Runtime.RuntimeInitializer.Initialize();", roslynHost.ParseOptions);
         }
 
         public void Restore()
@@ -173,7 +182,7 @@
 
         private async Task<string> BuildCsprojAsync(CancellationToken cancellationToken)
         {
-            var csproj = MSBuildHelper.CreateCsproj(_buildInfo.DotNetSdkInfo.TargetFrameworkMoniker);
+            var csproj = MSBuildHelper.CreateCsproj(_buildInfo.DotNetSdkInfo.TargetFrameworkMoniker, _roslynHost.DefaultReferences.Select(x => x.Display));
             var csprojPath = Path.Combine(_buildInfo.BuildPath, "rpSampleProject.csproj");
 
             using (var fs = new FileStream(csprojPath, FileMode.Create))
@@ -221,54 +230,91 @@
             return File.ReadAllLinesAsync(Path.Combine(_buildInfo.BuildPath, file), cancellationToken);
         }
 
+        public Task TerminateAsync()
+        {
+            StopProcess();
+            return Task.CompletedTask;
+        }
+
+        private void StopProcess()
+        {
+            _executeCts?.Cancel();
+        }
+
         public async Task ExecuteAsync(string code)
         {
             await GetCurrentRestoreTask().ConfigureAwait(false);
 
-            using var executeCts = new CancellationTokenSource();
-            var cancellationToken = executeCts.Token;
-
-            var scriptOptions = ScriptOptions.Default;
-            if (_metadataReferences != null)
+            try
             {
-                scriptOptions = scriptOptions.WithReferences(_metadataReferences);
+                using var executeCts = new CancellationTokenSource();
+                var cancellationToken = executeCts.Token;
+
+                var scriptOptions = ScriptOptions.Default.WithImports(_roslynHost.DefaultImports);
+                if (_metadataReferences != null)
+                {
+                    scriptOptions = scriptOptions.WithReferences(_metadataReferences);
+                }
+
+                var script = new ScriptRunner(
+                    null,
+                    ImmutableList.Create(_initHostSyntax, ParseCode(code)),
+                    parseOptions: _roslynHost.ParseOptions as CSharpParseOptions,
+                    outputKind: OutputKind.ConsoleApplication,
+                    platform: Platform.AnyCpu,
+                    references: scriptOptions.MetadataReferences,
+                    usings: scriptOptions.Imports,
+                    filePath: scriptOptions.FilePath,
+                    workingDirectory: _buildInfo.BuildPath,
+                    metadataResolver: scriptOptions.MetadataResolver,
+                    optimizationLevel: OptimizationLevel.Release,
+                    checkOverflow: true,
+                    allowUnsafe: true);
+
+                var assemblyPath = Path.Combine(_buildInfo.BuildPath, "bin", "rpSampleProject.dll");
+
+                var diagnostics = await script.SaveAssembly(assemblyPath, cancellationToken).ConfigureAwait(false);
+
+                // TODO: send diagnostics messages to UI Console
+
+                BuildMessage?.Invoke($"{assemblyPath} assembly save ended.");
+
+                var errorDiagnostics = diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error).ToList();
+                if (errorDiagnostics.Any())
+                {
+                    // TODO: send error diagnostics messages to UI Console
+
+                    BuildMessage?.Invoke("Build FAILED.");
+
+                    return;
+                }
+
+                BuildMessage?.Invoke("Build succeeded.");
+
+
+                _executeCts = executeCts;
+
+                await RunProcess(assemblyPath, cancellationToken);
+            }
+            finally
+            {
+                _executeCts = null;
+            }
+        }
+
+        private SyntaxTree ParseCode(string code)
+        {
+            var tree = SyntaxFactory.ParseSyntaxTree(code, _roslynHost.ParseOptions);
+            var root = tree.GetRoot();
+
+            if (root is CompilationUnitSyntax c)
+            {
+                var members = c.Members;
+
+                root = c.WithMembers(members);
             }
 
-            var script = new ScriptRunner(
-                code,
-                parseOptions: _roslynHost.ParseOptions as CSharpParseOptions,
-                outputKind: OutputKind.ConsoleApplication,
-                platform: Platform.AnyCpu,
-                references: scriptOptions.MetadataReferences,
-                usings: scriptOptions.Imports,
-                filePath: scriptOptions.FilePath,
-                workingDirectory: _buildInfo.BuildPath,
-                metadataResolver: scriptOptions.MetadataResolver,
-                optimizationLevel: OptimizationLevel.Release,
-                checkOverflow: true,
-                allowUnsafe: true);
-
-            var assemblyPath = Path.Combine(_buildInfo.BuildPath, "bin", "rpSampleProject.dll");
-
-            var diagnostics = await script.SaveAssembly(assemblyPath, cancellationToken).ConfigureAwait(false);
-            
-            // TODO: send diagnostics messages to UI Console
-
-            BuildMessage?.Invoke($"{assemblyPath} assembly save ended.");
-
-            var errorDiagnostics = diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error).ToList();
-            if (errorDiagnostics.Any())
-            {
-                // TODO: send error diagnostics messages to UI Console
-
-                BuildMessage?.Invoke("Build FAILED.");
-
-                return;
-            }
-
-            BuildMessage?.Invoke("Build succeeded.");
-
-            await RunProcess(assemblyPath, cancellationToken);
+            return tree.WithRootAndOptions(root, _roslynHost.ParseOptions);
         }
 
         private async Task RunProcess(string assemblyPath, CancellationToken cancellationToken)
@@ -320,7 +366,7 @@
                 var line = await reader.ReadLineAsync().ConfigureAwait(false);
                 if (line != null)
                 {
-                    ConsoleMessage?.Invoke(line);
+                    ConsoleMessage?.Invoke(ConsoleDumpData.DeserializeContent(line));
                 }
             }
         }
