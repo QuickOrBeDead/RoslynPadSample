@@ -39,7 +39,7 @@
 
             AppDomain.CurrentDomain.UnhandledException += (o, e) =>
                 {
-                    // consoleDumper.DumpException((Exception)e.ExceptionObject);
+                    // TODO: Dump exception
                     Environment.Exit(1);
                 };
 
