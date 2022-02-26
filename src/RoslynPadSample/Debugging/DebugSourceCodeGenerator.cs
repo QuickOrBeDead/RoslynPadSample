@@ -11,6 +11,9 @@
 
     using DebugStatement = System.ValueTuple<Microsoft.CodeAnalysis.CSharp.Syntax.StatementSyntax, string[]>;
 
+    /// <summary>
+    /// https://dev.to/saka_pon/build-your-own-debugger-using-roslyns-syntax-analysis-1p44
+    /// </summary>
     public static class DebugSourceCodeGenerator
     {
         public static string Generate(string sourceCode)
